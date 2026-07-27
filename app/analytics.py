@@ -22,7 +22,7 @@ def pipeline_summary(deals: pd.DataFrame) -> dict:
     total_pipeline_value = open_deals["deal_value"].sum()
 
     by_sector = (
-        open_deals.dropna(subset=["sector"])
+        open_deals.assign(sector=open_deals["sector"].fillna("Unknown"))
         .groupby("sector")["deal_value"]
         .sum()
         .sort_values(ascending=False)
