@@ -4,127 +4,97 @@ agent.py
 The ONLY module that talks to an LLM.
 
 Architecture:
-- analytics.py calculates numbers
-- cleaner.py provides data quality notes
-- this file only sends compact metrics to Claude
-- Claude explains insights in founder-friendly language
+- Python computes business metrics (analytics.py)
+- This module sends only structured metrics to Gemini
+- Gemini explains insights in founder/executive language
 
-Model:
-Claude via Anthropic API
+Model: Google Gemini API
 """
 
 import os
 import json
-import anthropic
-import streamlit as st
+import google.generativeai as genai
 
 
 MODEL = os.environ.get(
-    "ANTHROPIC_MODEL",
-    "claude-3-5-sonnet-20240620"
+    "GEMINI_MODEL",
+    "gemini-1.5-flash"
 )
 
 
 SYSTEM_PROMPT = """
-You are a Business Intelligence analyst agent for Skylark Drones,
-a drone-services company.
+You are a Business Intelligence analyst agent for Skylark Drones, a drone-services
+company.
 
-Founders and executives ask natural language questions about:
+Founders and executives ask you natural-language questions about:
 - Sales pipeline (Deals board)
 - Project execution (Work Orders board)
-- Billing and collections
-- Operational risks
+- Revenue and billing
+- Sector performance
+- Business risks
 
-Important rules:
+Your job is to turn structured analytics into executive-level insights.
 
-1. You receive PRECOMPUTED metrics from Python.
+Rules:
+
+1. You are given PRECOMPUTED metrics as JSON.
 Never invent numbers.
-Only use numbers present in the metrics JSON.
+Only use numbers available in the provided metrics.
 
-2. Mention important data quality issues briefly when relevant.
-Examples:
+2. Mention important data-quality caveats when relevant:
 - missing values
 - incomplete records
-- approximate joins
 - inconsistent categories
+- approximate joins
 
-Do not overwhelm the user with disclaimers.
+Keep caveats brief.
 
 3. If the question is ambiguous:
 - make a reasonable assumption
 - state the assumption briefly
-- continue answering
+- continue with the answer
 
-Only ask a clarification question if you truly cannot answer.
+Only ask a question if you cannot answer meaningfully.
 
 4. Write like a founder briefing:
 - Start with the key numbers
-- Explain business meaning
-- Highlight risks or opportunities
+- Then explain business implications
+- Highlight risks and opportunities
 
 Avoid:
-- filler
-- generic AI language
-- "I hope this helps"
+- generic statements
+- unnecessary disclaimers
+- saying "as an AI"
 
-5. For leadership updates, use:
+5. For leadership update requests, structure the answer as:
 
-Sales:
-- pipeline status
-- important deals
+## Sales
+## Operations
+## Billing
+## Risks
+## Recommendations
 
-Operations:
-- execution status
-- delays
-
-Billing:
-- collections
-
-Risks:
-- concerns
-
-Recommendations:
-- actions for leadership
+Keep responses concise and executive-friendly.
 """
 
 
-def _get_secret(name: str):
-
+def _client():
     """
-    Supports:
-    - Streamlit Cloud secrets
-    - Environment variables
+    Creates Gemini client.
     """
 
-    value = os.environ.get(name)
-
-    if value:
-        return value
-
-    try:
-        return st.secrets[name]
-    except Exception:
-        return None
-
-
-
-def _client() -> anthropic.Anthropic:
-
-    api_key = _get_secret(
-        "ANTHROPIC_API_KEY"
-    )
+    api_key = os.environ.get("GEMINI_API_KEY")
 
     if not api_key:
-
         raise RuntimeError(
-            "ANTHROPIC_API_KEY is missing. "
-            "Add it in Streamlit Cloud secrets."
+            "GEMINI_API_KEY is not set."
         )
 
-    return anthropic.Anthropic(
-        api_key=api_key
-    )
+    genai.configure(api_key=api_key)
 
+    return genai.GenerativeModel(
+        MODEL
+    )
 
 
 def answer_query(
@@ -133,96 +103,74 @@ def answer_query(
     data_quality_notes: list[str],
     conversation_history: list[dict] | None = None
 ) -> str:
+    """
+    Sends founder question + computed metrics to Gemini.
 
+    Gemini does NOT receive raw monday.com rows.
+    """
 
     context_block = {
-
         "metrics": metrics_context,
-
-        "data_quality_notes":
-            data_quality_notes
-
+        "data_quality_notes": data_quality_notes
     }
 
 
-    messages = list(
-        conversation_history or []
-    )
+    history_text = ""
 
+    if conversation_history:
+        history_text = "\nPrevious conversation:\n"
 
-    messages.append(
-        {
-            "role": "user",
-            "content": (
-                f"Founder's question:\n"
-                f"{user_message}\n\n"
-
-                f"Precomputed business metrics:\n"
-                f"{json.dumps(context_block, indent=2, default=str)}"
+        for message in conversation_history:
+            history_text += (
+                f"{message['role']}: "
+                f"{message['content']}\n"
             )
-        }
-    )
+
+
+    prompt = f"""
+{SYSTEM_PROMPT}
+
+
+{history_text}
+
+
+Founder's question:
+
+{user_message}
+
+
+Precomputed business metrics:
+
+{json.dumps(
+    context_block,
+    indent=2,
+    default=str
+)}
+
+Now provide the executive-level answer.
+"""
 
 
     try:
 
-        response = _client().messages.create(
-
-            model=MODEL,
-
-            max_tokens=1200,
-
-            temperature=0,
-
-            system=SYSTEM_PROMPT,
-
-            messages=messages
-
+        response = _client().generate_content(
+            prompt
         )
 
-
-        return "".join(
-
-            block.text
-
-            for block in response.content
-
-            if block.type == "text"
-
-        )
-
-
-    except anthropic.AuthenticationError:
-
-        return (
-            "Claude authentication failed. "
-            "Please check that ANTHROPIC_API_KEY is correctly configured."
-        )
-
-
-    except anthropic.APIError as e:
-
-        return (
-            "Claude API error occurred while generating the answer.\n\n"
-            f"Details: {e}"
-        )
+        return response.text
 
 
     except Exception as e:
 
         return (
-            "Unexpected error while generating the AI response.\n\n"
-            f"Details: {e}"
+            "Gemini API error occurred while generating the answer.\n\n"
+            f"Details: {str(e)}"
         )
 
 
-
-def route_intent(
-    user_message: str
-) -> str:
-
+def route_intent(user_message: str) -> str:
     """
-    Lightweight transparent intent router.
+    Lightweight keyword router.
 
     Returns:
     pipeline
@@ -242,9 +190,9 @@ def route_intent(
         for k in [
             "leadership",
             "weekly update",
-            "summary",
-            "exec update",
-            "brief"
+            "summary for",
+            "brief the",
+            "exec update"
         ]
     ):
         return "leadership"
@@ -269,7 +217,8 @@ def route_intent(
             "invoice",
             "receivable",
             "collection",
-            "collected"
+            "collected",
+            "revenue collected"
         ]
     ):
         return "billing"
@@ -280,7 +229,6 @@ def route_intent(
         for k in [
             "operation",
             "execution",
-            "delay",
             "delayed",
             "project status",
             "work order"
