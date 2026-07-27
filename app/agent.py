@@ -18,7 +18,7 @@ import google.generativeai as genai
 
 MODEL = os.environ.get(
     "GEMINI_MODEL",
-    "gemini-1.5-flash"
+    "gemini-2.0-flash"
 )
 
 
