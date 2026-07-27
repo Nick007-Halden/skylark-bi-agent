@@ -1,17 +1,19 @@
 """
 streamlit_app.py
 -----------------
-Entry point:
-streamlit run app/streamlit_app.py
+Entry point.
 
 Flow:
-User question
-    -> route intent
-    -> fetch cached monday.com data
-    -> clean and normalize
-    -> calculate metrics
-    -> send metrics + question to Claude
-    -> display answer
+user question
+    -> route_intent()
+    -> pull live data from monday.com
+    -> clean data
+    -> compute business metrics
+    -> send metrics + question to Gemini
+    -> render executive answer
+
+The LLM never receives raw monday.com rows.
+Python computes metrics; Gemini explains insights.
 """
 
 import os
@@ -23,9 +25,14 @@ import analytics
 import agent
 
 
-# -----------------------------
-# Page Configuration
-# -----------------------------
+QUICK_QUESTIONS = [
+    "How's our pipeline looking overall?",
+    "Prepare my weekly leadership update",
+    "Which projects are delayed?",
+    "What's our billing and collections status?",
+    "Are there any at-risk deals we should worry about?",
+]
+
 
 st.set_page_config(
     page_title="Skylark Drones — BI Agent",
@@ -34,59 +41,16 @@ st.set_page_config(
 )
 
 
-# -----------------------------
-# Secrets Handling
-# -----------------------------
-
-def get_secret(name):
-    """
-    Works on both:
-    - Streamlit Cloud secrets
-    - Environment variables
-    """
-
-    value = os.environ.get(name)
-
-    if value:
-        return value
-
-    try:
-        return st.secrets[name]
-    except Exception:
-        return None
-
-
-missing = []
-
-if not get_secret("MONDAY_API_TOKEN"):
-    missing.append("MONDAY_API_TOKEN")
-
-if not get_secret("ANTHROPIC_API_KEY"):
-    missing.append("ANTHROPIC_API_KEY")
-
-
-if missing:
-    st.error(
-        f"Missing configuration: {', '.join(missing)}\n\n"
-        "Add these values in Streamlit Cloud → Manage App → Settings → Secrets."
-    )
-    st.stop()
-
-
-# -----------------------------
-# Header
-# -----------------------------
-
 st.title("🛰️ Skylark Drones — Business Intelligence Agent")
 
 st.caption(
-    "Ask about pipeline, sectors, projects, billing, operational risks, "
-    "or generate leadership updates."
+    "Ask about pipeline, sectors, project execution, billing, "
+    "or request a leadership update."
 )
 
 
 # -----------------------------
-# Sidebar Configuration
+# Sidebar configuration
 # -----------------------------
 
 with st.sidebar:
@@ -94,32 +58,55 @@ with st.sidebar:
     st.subheader("Configuration")
 
     deals_board_id = st.text_input(
-        "Deals Board ID",
+        "Deals board ID",
         value=os.environ.get("DEALS_BOARD_ID", "")
     )
 
-    work_orders_board_id = st.text_input(
-        "Work Orders Board ID",
+    wo_board_id = st.text_input(
+        "Work Orders board ID",
         value=os.environ.get("WORK_ORDERS_BOARD_ID", "")
     )
 
-
     refresh = st.button(
-        "🔄 Refresh monday.com data"
+        "🔄 Refresh live data from monday.com"
     )
 
-
-    st.divider()
+    st.markdown("---")
 
     st.caption(
-        "Board IDs are the numbers in your monday.com board URL."
+        "Board IDs are available from the monday.com board URL."
     )
 
 
-if not deals_board_id or not work_orders_board_id:
+# -----------------------------
+# Secret validation
+# -----------------------------
+
+missing_secrets = []
+
+if not os.environ.get("MONDAY_API_TOKEN"):
+    missing_secrets.append("MONDAY_API_TOKEN")
+
+if not os.environ.get("GEMINI_API_KEY"):
+    missing_secrets.append("GEMINI_API_KEY")
+
+
+if missing_secrets:
+
+    st.error(
+        f"Missing required configuration: "
+        f"{', '.join(missing_secrets)}. "
+        "Add them in Streamlit Cloud → Settings → Secrets."
+    )
+
+    st.stop()
+
+
+
+if not deals_board_id or not wo_board_id:
 
     st.warning(
-        "Enter both monday.com board IDs in the sidebar."
+        "Enter both monday.com board IDs in the sidebar to begin."
     )
 
     st.stop()
@@ -127,17 +114,17 @@ if not deals_board_id or not work_orders_board_id:
 
 
 # -----------------------------
-# Cached Data Loader
+# Load monday.com data
 # -----------------------------
 
 @st.cache_data(
-    ttl=900,
-    show_spinner="Loading monday.com data..."
+    ttl=300,
+    show_spinner="Pulling live data from monday.com..."
 )
 def load_data(
-    deals_id,
-    work_orders_id,
-    refresh_key
+    deals_id: str,
+    wo_id: str,
+    refresh_token: int
 ):
 
     cleaner.reset_quality_notes()
@@ -146,8 +133,8 @@ def load_data(
         deals_id
     )
 
-    work_orders_raw = monday_client.get_board_items(
-        work_orders_id
+    wo_raw = monday_client.get_board_items(
+        wo_id
     )
 
 
@@ -155,8 +142,8 @@ def load_data(
         deals_raw
     )
 
-    work_orders_df = cleaner.clean_work_orders(
-        work_orders_raw
+    wo_df = cleaner.clean_work_orders(
+        wo_raw
     )
 
 
@@ -165,58 +152,51 @@ def load_data(
 
     return (
         deals_df,
-        work_orders_df,
+        wo_df,
         notes
     )
 
 
 
-# -----------------------------
-# Refresh Handling
-# -----------------------------
+if "refresh_token" not in st.session_state:
 
-if "refresh_key" not in st.session_state:
-    st.session_state.refresh_key = 0
+    st.session_state.refresh_token = 0
+
 
 
 if refresh:
 
-    st.session_state.refresh_key += 1
+    st.session_state.refresh_token += 1
 
-    st.success(
-        "Refreshing monday.com data..."
-    )
+    st.cache_data.clear()
 
 
-
-# -----------------------------
-# Load Data
-# -----------------------------
 
 try:
 
-    deals_df, work_orders_df, quality_notes = load_data(
+    deals_df, wo_df, quality_notes = load_data(
         deals_board_id,
-        work_orders_board_id,
-        st.session_state.refresh_key
+        wo_board_id,
+        st.session_state.refresh_token
     )
 
 
 except monday_client.MondayAPIError as e:
 
     st.error(
-        "Unable to retrieve monday.com data.\n\n"
-        "Check your API token and board IDs.\n\n"
+        "Unable to retrieve data from monday.com.\n\n"
+        "Check your API token, board IDs, or monday.com availability.\n\n"
         f"Details: {e}"
     )
 
     st.stop()
+
 
 
 except Exception as e:
 
     st.error(
-        "Unexpected error while loading data.\n\n"
+        "Unexpected error while loading monday.com data.\n\n"
         f"Details: {e}"
     )
 
@@ -225,17 +205,17 @@ except Exception as e:
 
 
 # -----------------------------
-# Sidebar Metrics
+# Sidebar metrics
 # -----------------------------
 
 st.sidebar.metric(
-    "Deals Loaded",
+    "Deals loaded",
     len(deals_df)
 )
 
 st.sidebar.metric(
-    "Work Orders Loaded",
-    len(work_orders_df)
+    "Work orders loaded",
+    len(wo_df)
 )
 
 
@@ -243,10 +223,11 @@ st.sidebar.metric(
 if quality_notes:
 
     with st.sidebar.expander(
-        f"⚠️ Data Quality Notes ({len(quality_notes)})"
+        f"⚠️ {len(quality_notes)} data quality notes"
     ):
 
         for note in quality_notes:
+
             st.write(
                 f"- {note}"
             )
@@ -254,23 +235,59 @@ if quality_notes:
 
 
 # -----------------------------
-# Intent + Metrics
+# Chat state
+# -----------------------------
+
+if "messages" not in st.session_state:
+
+    st.session_state.messages = []
+
+
+
+for msg in st.session_state.messages:
+
+    with st.chat_message(
+        msg["role"]
+    ):
+
+        st.markdown(
+            msg["content"]
+        )
+
+
+
+# -----------------------------
+# Sector detection
 # -----------------------------
 
 KNOWN_SECTORS = sorted(
     set(
-        list(deals_df["sector"].dropna().unique())
+        list(
+            deals_df["sector"]
+            .dropna()
+            .unique()
+        )
         +
-        list(work_orders_df["sector"].dropna().unique())
+        list(
+            wo_df["sector"]
+            .dropna()
+            .unique()
+        )
     )
 )
 
 
 
-def build_metrics_for_query(question):
+# -----------------------------
+# Analytics routing
+# -----------------------------
+
+def build_metrics_for_query(
+    user_message: str
+):
 
     intent = agent.route_intent(
-        question
+        user_message
     )
 
 
@@ -278,7 +295,7 @@ def build_metrics_for_query(question):
 
         return analytics.leadership_update(
             deals_df,
-            work_orders_df
+            wo_df
         )
 
 
@@ -288,7 +305,7 @@ def build_metrics_for_query(question):
             "cross_board_risk":
                 analytics.cross_board_risk_view(
                     deals_df,
-                    work_orders_df
+                    wo_df
                 )
         }
 
@@ -298,7 +315,7 @@ def build_metrics_for_query(question):
         return {
             "billing":
                 analytics.billing_summary(
-                    work_orders_df
+                    wo_df
                 )
         }
 
@@ -308,29 +325,30 @@ def build_metrics_for_query(question):
         return {
             "operations":
                 analytics.operations_summary(
-                    work_orders_df
+                    wo_df
                 )
         }
 
 
     if intent == "sector":
 
-        matched = next(
+        matched_sector = next(
             (
                 s for s in KNOWN_SECTORS
-                if s.lower() in question.lower()
+                if s.lower()
+                in user_message.lower()
             ),
             None
         )
 
 
-        if matched:
+        if matched_sector:
 
             return {
                 "sector_detail":
                     analytics.sector_pipeline(
                         deals_df,
-                        matched
+                        matched_sector
                     )
             }
 
@@ -345,19 +363,23 @@ def build_metrics_for_query(question):
             "available_sectors":
                 KNOWN_SECTORS,
 
-            "note":
-                "Ask user to select a sector."
+            "note_to_agent":
+                "User mentioned a sector but it did not match "
+                "known sectors. Ask for clarification."
         }
+
 
 
     if intent == "pipeline":
 
         return {
+
             "pipeline":
                 analytics.pipeline_summary(
                     deals_df
                 )
         }
+
 
 
     return {
@@ -369,7 +391,7 @@ def build_metrics_for_query(question):
 
         "operations":
             analytics.operations_summary(
-                work_orders_df
+                wo_df
             ),
 
         "available_sectors":
@@ -378,36 +400,59 @@ def build_metrics_for_query(question):
 
 
 
-
 # -----------------------------
-# Chat Interface
+# Quick questions
 # -----------------------------
 
-if "messages" not in st.session_state:
+if not st.session_state.messages:
 
-    st.session_state.messages = []
+    st.caption(
+        "Quick questions:"
+    )
 
 
+    cols = st.columns(
+        len(QUICK_QUESTIONS)
+    )
 
-for message in st.session_state.messages:
 
-    with st.chat_message(
-        message["role"]
+    for col, question in zip(
+        cols,
+        QUICK_QUESTIONS
     ):
 
-        st.markdown(
-            message["content"]
-        )
+        if col.button(
+            question,
+            use_container_width=True
+        ):
+
+            st.session_state.pending_prompt = question
 
 
+
+# -----------------------------
+# Chat input
+# -----------------------------
 
 prompt = st.chat_input(
-    "Example: How is our pipeline looking for Energy this quarter?"
+    "Example: How's our pipeline looking for Energy this quarter?"
 )
 
 
 
+if (
+    not prompt
+    and st.session_state.get("pending_prompt")
+):
+
+    prompt = st.session_state.pop(
+        "pending_prompt"
+    )
+
+
+
 if prompt:
+
 
     st.session_state.messages.append(
         {
@@ -417,46 +462,67 @@ if prompt:
     )
 
 
-    with st.chat_message("user"):
+    with st.chat_message(
+        "user"
+    ):
 
-        st.markdown(prompt)
+        st.markdown(
+            prompt
+        )
 
 
+    with st.chat_message(
+        "assistant"
+    ):
 
-    with st.chat_message("assistant"):
 
         with st.spinner(
             "Analyzing business data..."
         ):
 
 
-            metrics = build_metrics_for_query(
-                prompt
-            )
+            try:
+
+                metrics = build_metrics_for_query(
+                    prompt
+                )
 
 
-            # Only send recent history
-            history = [
-                {
-                    "role": m["role"],
-                    "content": m["content"]
-                }
+                history = [
+                    {
+                        "role": m["role"],
+                        "content": m["content"]
+                    }
 
-                for m in st.session_state.messages[-6:-1]
-            ]
-
-
-            answer = agent.answer_query(
-                prompt,
-                metrics,
-                quality_notes,
-                conversation_history=history
-            )
+                    for m in st.session_state.messages[:-1]
+                ]
 
 
-            st.markdown(
-                answer
-            )
+                answer = agent.answer_query(
+                    prompt,
+                    metrics,
+                    quality_notes,
+                    conversation_history=history
+                )
+
+
+                st.markdown(
+                    answer
+                )
+
+
+            except Exception as e:
+
+                answer = (
+                    "Unexpected error while generating "
+                    "the AI response.\n\n"
+                    f"Details: {e}"
+                )
+
+
+                st.error(
+                    answer
+                )
 
 
     st.session_state.messages.append(
