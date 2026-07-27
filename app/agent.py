@@ -1,14 +1,12 @@
 """
 agent.py
 --------
-The ONLY module that talks to an LLM.
+Gemini-powered Business Intelligence Agent.
 
 Architecture:
-- Python computes business metrics (analytics.py)
-- This module sends only structured metrics to Gemini
-- Gemini explains insights in founder/executive language
-
-Model: Google Gemini API
+- Python analytics.py calculates metrics.
+- This file sends only summarized metrics to Gemini.
+- Gemini explains insights in founder-friendly language.
 """
 
 import os
@@ -23,77 +21,53 @@ MODEL = os.environ.get(
 
 
 SYSTEM_PROMPT = """
-You are a Business Intelligence analyst agent for Skylark Drones, a drone-services
-company.
+You are a Business Intelligence analyst for Skylark Drones.
 
-Founders and executives ask you natural-language questions about:
-- Sales pipeline (Deals board)
-- Project execution (Work Orders board)
-- Revenue and billing
-- Sector performance
-- Business risks
-
-Your job is to turn structured analytics into executive-level insights.
+You answer founder and executive questions using data from:
+1. monday.com Deals board
+2. monday.com Work Orders board
 
 Rules:
 
-1. You are given PRECOMPUTED metrics as JSON.
-Never invent numbers.
-Only use numbers available in the provided metrics.
+1. You only use numbers provided in the metrics JSON.
+Do not invent values.
 
-2. Mention important data-quality caveats when relevant:
-- missing values
-- incomplete records
-- inconsistent categories
-- approximate joins
+2. If data quality issues exist, mention them briefly.
 
-Keep caveats brief.
+3. Answer like a founder briefing:
+- Start with important numbers
+- Explain business meaning
+- Highlight risks
+- Suggest actions
 
-3. If the question is ambiguous:
-- make a reasonable assumption
-- state the assumption briefly
-- continue with the answer
+4. If the question is unclear:
+make a reasonable assumption and state it.
 
-Only ask a question if you cannot answer meaningfully.
+5. For leadership updates use:
 
-4. Write like a founder briefing:
-- Start with the key numbers
-- Then explain business implications
-- Highlight risks and opportunities
-
-Avoid:
-- generic statements
-- unnecessary disclaimers
-- saying "as an AI"
-
-5. For leadership update requests, structure the answer as:
-
-## Sales
-## Operations
-## Billing
-## Risks
-## Recommendations
+Sales:
+Operations:
+Billing:
+Risks:
+Recommendations:
 
 Keep responses concise and executive-friendly.
 """
 
 
 def _client():
-    """
-    Creates Gemini client.
-    """
-
     api_key = os.environ.get("GEMINI_API_KEY")
 
     if not api_key:
         raise RuntimeError(
-            "GEMINI_API_KEY is not set."
+            "GEMINI_API_KEY is missing"
         )
 
     genai.configure(api_key=api_key)
 
     return genai.GenerativeModel(
-        MODEL
+        model_name=MODEL,
+        system_instruction=SYSTEM_PROMPT
     )
 
 
@@ -101,59 +75,34 @@ def answer_query(
     user_message: str,
     metrics_context: dict,
     data_quality_notes: list[str],
-    conversation_history: list[dict] | None = None
-) -> str:
-    """
-    Sends founder question + computed metrics to Gemini.
+    conversation_history=None
+):
 
-    Gemini does NOT receive raw monday.com rows.
-    """
-
-    context_block = {
+    context = {
         "metrics": metrics_context,
         "data_quality_notes": data_quality_notes
     }
 
 
-    history_text = ""
-
-    if conversation_history:
-        history_text = "\nPrevious conversation:\n"
-
-        for message in conversation_history:
-            history_text += (
-                f"{message['role']}: "
-                f"{message['content']}\n"
-            )
-
-
     prompt = f"""
-{SYSTEM_PROMPT}
-
-
-{history_text}
-
-
-Founder's question:
+Founder question:
 
 {user_message}
 
 
-Precomputed business metrics:
+Business metrics:
 
-{json.dumps(
-    context_block,
-    indent=2,
-    default=str
-)}
+{json.dumps(context, indent=2, default=str)}
 
-Now provide the executive-level answer.
+
+Provide the executive analysis.
 """
 
 
     try:
+        model = _client()
 
-        response = _client().generate_content(
+        response = model.generate_content(
             prompt
         )
 
@@ -162,109 +111,71 @@ Now provide the executive-level answer.
 
     except Exception as e:
 
-        return (
-            "Gemini API error occurred while generating the answer.\n\n"
-            f"Details: {str(e)}"
+        raise RuntimeError(
+            f"Gemini API error occurred while generating the answer.\n\nDetails: {e}"
         )
 
 
-def route_intent(user_message: str) -> str:
-    """
-    Lightweight keyword router.
-
-    Returns:
-    pipeline
-    sector
-    operations
-    billing
-    risk
-    leadership
-    general
-    """
+def route_intent(user_message: str):
 
     q = user_message.lower()
 
 
-    if any(
-        k in q
-        for k in [
-            "leadership",
-            "weekly update",
-            "summary for",
-            "brief the",
-            "exec update"
-        ]
-    ):
+    if any(k in q for k in [
+        "leadership",
+        "weekly update",
+        "exec update",
+        "summary"
+    ]):
         return "leadership"
 
 
-    if any(
-        k in q
-        for k in [
-            "risk",
-            "at risk",
-            "stalled",
-            "problem"
-        ]
-    ):
+    if any(k in q for k in [
+        "risk",
+        "at risk",
+        "stalled"
+    ]):
         return "risk"
 
 
-    if any(
-        k in q
-        for k in [
-            "bill",
-            "invoice",
-            "receivable",
-            "collection",
-            "collected",
-            "revenue collected"
-        ]
-    ):
+    if any(k in q for k in [
+        "bill",
+        "invoice",
+        "collection",
+        "revenue collected"
+    ]):
         return "billing"
 
 
-    if any(
-        k in q
-        for k in [
-            "operation",
-            "execution",
-            "delayed",
-            "project status",
-            "work order"
-        ]
-    ):
+    if any(k in q for k in [
+        "operation",
+        "execution",
+        "project status",
+        "work order",
+        "delay"
+    ]):
         return "operations"
 
 
-    if any(
-        k in q
-        for k in [
-            "sector",
-            "energy",
-            "mining",
-            "railway",
-            "renewable",
-            "powerline",
-            "construction",
-            "tender"
-        ]
-    ):
+    if any(k in q for k in [
+        "sector",
+        "energy",
+        "mining",
+        "railway",
+        "renewable",
+        "construction"
+    ]):
         return "sector"
 
 
-    if any(
-        k in q
-        for k in [
-            "pipeline",
-            "deal",
-            "revenue",
-            "closing",
-            "quarter",
-            "won",
-            "lost"
-        ]
-    ):
+    if any(k in q for k in [
+        "pipeline",
+        "deal",
+        "closing",
+        "quarter",
+        "won",
+        "lost"
+    ]):
         return "pipeline"
 
 
