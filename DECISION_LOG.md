@@ -1,75 +1,37 @@
 # Decision Log
 
-## Key assumptions
+## Assumptions I made
 
-- **Board IDs, not names, identify the boards.** The app takes monday.com board IDs as
-  config rather than searching by board name, to avoid ambiguity if boards get renamed
-  or duplicated during evaluation.
-- **"Quarter" and other vague time references** are resolved by the LLM using the
-  Tentative Close Date / Created Date fields already in the metrics payload; if a
-  question has no resolvable time anchor, the agent states its assumption inline rather
-  than blocking on a clarifying question.
-- **Pipeline = deals with Deal Status = "Open".** Deals marked "Dead" or "Won" are
-  reported separately (win rate, dead count) but excluded from "pipeline value" figures,
-  matching how a founder would expect "pipeline" to be scoped.
-- **Deal Name is the only usable cross-board key.** Deals uses `Client Code`
-  (e.g. `COMPANY089`); Work Orders uses `Customer Name Code` (e.g. `WOCOMPANY_002`) —
-  different masking namespaces with no overlap. The masked `Deal Name` (e.g. "Sakura")
-  is shared but repeats across many unrelated records in both sheets. I treat any join
-  on it as **approximate** and hard-code that caveat into every cross-board analytics
-  function's output, so the agent cannot present it as exact.
-- **Numeric fields with unit suffixes** ("5360 HA", "40MW", "2 location") are parsed by
-  extracting the leading numeric value and discarding the unit. This is a defensible
-  default for aggregate sums but means "HA" and "MW" quantities get summed together if a
-  query spans work types — flagged as a data-quality note whenever it affects an answer.
+I treated "pipeline" as deals with Deal Status marked Open. Deals marked Won or Dead get counted separately (I show a win rate and a dead count) but I didn't include them in pipeline value, since that's how a founder would actually expect the word "pipeline" to be used.
 
-## Trade-offs chosen and why
+For vague time references like "this quarter," I let the agent use whatever date fields are already in the data (Tentative Close Date, Created Date) and just state its assumption in the answer rather than stopping to ask every time. If it genuinely can't figure out what's being asked, it asks.
 
-- **Keyword-based intent routing instead of an LLM planner call.** A second LLM call to
-  classify intent adds latency and a second point of failure for a 6-hour build. A small,
-  transparent keyword router is easy to audit, fast, and covers the founder-question
-  patterns in the brief. Trade-off: less flexible than an LLM planner for very novel
-  phrasings — the "general" fallback path mitigates this by handing the LLM a broad
-  metrics bundle plus the list of available sectors, so it can still self-route within
-  its own answer or ask a clarifying question.
-- **Streamlit over a separate React/FastAPI stack.** Skylark's evaluators need a hosted,
-  testable link inside a 6-hour window. Streamlit Community Cloud deploys directly from
-  a GitHub repo with zero infra work, and keeps the architecture (client → cleaner →
-  analytics → LLM) just as clean internally as a split frontend/backend would, without
-  the deployment overhead. Trade-off: less UI polish than a custom frontend.
-- **Short-TTL in-memory cache (60s) instead of no cache or a persistent DB.** Satisfies
-  "query monday.com dynamically" (never a static hardcoded source) while avoiding
-  redundant API calls within one user session. A persistent cache/warehouse would be the
-  right call at production scale — noted below.
-- **The LLM only ever receives computed metrics, never raw rows.** This is the single
-  biggest reliability decision in the project. LLMs are unreliable at arithmetic over
-  many rows and at parsing inconsistent formats; pandas is not. This also keeps prompts
-  small and cheap regardless of board size.
+The biggest assumption, and the one I want to be upfront about: Deal Name is the only field that connects the two boards. Deals has a Client Code like COMPANY089, Work Orders has a Customer Name Code like WOCOMPANY_002. These are two completely different ID systems, they don't match up. The masked Deal Name (things like "Sakura" or "Tanjiro") is the only shared field, but it repeats across a lot of unrelated records in both sheets. So any time the agent connects a deal to its execution status, it's really just guessing based on name and sector, and I made sure that shows up as a caveat in the output every time, not just buried in this doc.
+
+I also assumed numeric fields with weird unit text attached ("5360 HA", "40MW", "2 location") should just have the number extracted and the unit dropped. That's fine for adding things up in most cases, but it does mean quantities in different units (hectares vs megawatts) get summed together if a question spans different types of work. I flag this in the data quality notes whenever it comes up.
+
+## Trade-offs and why
+
+I went with a simple keyword based router to figure out what kind of question someone's asking, instead of using another LLM call to do that classification. A second LLM call adds latency and another thing that can go wrong, and for a project on a 6 hour clock, I wanted something I could actually test and reason about quickly. The downside is it's less flexible for really unusual phrasing, so I built in a fallback: if nothing matches clearly, the agent just gets a broad set of metrics plus a list of known sectors, and either figures it out on its own or asks a clarifying question.
+
+I built this as a Streamlit app instead of a separate frontend and backend. Given the time limit and the requirement for a hosted link that's testable without any local setup, Streamlit Community Cloud deploys straight from GitHub with basically no infrastructure work. The internal code is still split cleanly into the same layers (client, cleaner, analytics, agent) it would be either way, I just didn't build a separate API server on top of it. The trade-off is it looks less like a custom product UI, more like a working tool.
+
+I added a short (60 second) cache on the monday.com reads instead of no caching at all or a proper database. This keeps things fast within one session without ever treating cached data as the permanent source of truth. Every fresh session, or hitting refresh, pulls live again.
+
+Probably the decision I care most about explaining: the LLM never sees raw rows, ever. It only gets numbers that Python already computed and double checked. I did this because LLMs are genuinely unreliable at doing arithmetic across a lot of rows, and I didn't want the agent confidently stating a wrong revenue number. Python does the counting, Claude does the explaining. Keeping prompts small this way also just makes the whole thing faster and cheaper regardless of how big the boards get.
 
 ## How I interpreted "prepare data for leadership updates"
 
-I implemented it as an on-demand conversational command ("prepare my weekly leadership
-update" / similar phrasing) rather than a scheduled email/export, since the brief scopes
-this as optional and the core deliverable is the conversational agent itself. Triggering
-it calls `analytics.leadership_update()`, which bundles pipeline, operations, billing,
-and cross-board risk metrics, and the system prompt instructs the LLM to structure the
-answer as: Sales / Operations / Billing / Risks / Recommendations — mirroring what a
-founder would actually forward to their team. Given more time, I'd add a one-click
-"export as PDF/Slack message" action on top of this same data bundle.
+Since this was listed as optional, I built it as something you ask for in the chat itself (something like "prepare my weekly leadership update") rather than a scheduled export or an email. Behind the scenes it pulls all four metric groups (pipeline, operations, billing, risk) at once and I instructed the agent to lay it out in sections: Sales, Operations, Billing, Risks, and Recommendations, basically what a founder would actually forward to their team as-is. If I had more time I'd add a one click PDF export on top of the same data.
 
-## What I'd do differently with more time
+## What I'd change with more time
 
-- **Semantic/fuzzy sector matching** (embeddings or a maintained synonym table) instead
-  of the current exact-match-plus-canonical-dict approach in `cleaner.py`, so an
-  unrecognized sector variant doesn't need a manual code addition.
-- **A real join key.** I'd push back to the business to get a shared deal ID across both
-  boards (or ingest a mapping table) rather than relying on repeated masked names —
-  this is the single highest-value data-quality fix available.
-- **Persistent metrics warehouse** (e.g. nightly ETL into a small Postgres/DuckDB store)
-  so historical trend questions ("how has pipeline grown over the last 6 months") don't
-  depend on monday.com's current-state API responses alone.
-- **Automated tests** for `cleaner.py`'s parsers against the actual messy value patterns
-  seen in the sheets (unit suffixes, `#VALUE!`, blank cells) — skipped due to the time-box
-  but straightforward to add given the pure-function design.
-- **Streaming responses** in the chat UI for perceived latency, and a proper LLM-based
-  planner (with tool-calling) once keyword routing's limits are actually hit in practice.
+The sector matching right now is a small dictionary of known spelling variants. A better version would use something fuzzier so it doesn't need manual updates every time a new spelling shows up in the data.
+
+The real fix for the join problem between the two boards isn't something code can solve, it's a data problem. I'd want a shared deal ID across both boards rather than relying on repeated masked names. That's the single most useful thing that could improve this.
+
+I'd also want a small database sitting behind this instead of relying purely on live monday.com reads, mainly so questions about trends over time (like "how has pipeline grown over the last six months") don't depend entirely on what the API returns right now.
+
+I didn't write automated tests for the cleaning functions given the time limit, though the way they're written (small, pure functions) makes that pretty straightforward to add later.
+
+Lastly, I'd swap the keyword router for an actual small LLM based planner once I hit real cases where keyword matching falls short, right now I just haven't hit those limits yet in testing.
