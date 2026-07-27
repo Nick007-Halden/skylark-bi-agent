@@ -21,7 +21,7 @@ import streamlit as st
 
 MODEL = os.environ.get(
     "ANTHROPIC_MODEL",
-    "claude-sonnet-4-6"
+    "claude-3-5-sonnet-20240620"
 )
 
 
