@@ -18,6 +18,14 @@ import cleaner
 import analytics
 import agent
 
+QUICK_QUESTIONS = [
+    "How's our pipeline looking overall?",
+    "Prepare my weekly leadership update",
+    "Which projects are delayed?",
+    "What's our billing and collections status?",
+    "Are there any at-risk deals we should worry about?",
+]
+
 st.set_page_config(page_title="Skylark Drones — BI Agent", page_icon="🛰️", layout="centered")
 st.title("🛰️ Skylark Drones — Business Intelligence Agent")
 st.caption("Ask about pipeline, sectors, project execution, billing, or ask for a leadership update.")
@@ -65,7 +73,23 @@ if refresh:
     st.session_state.refresh_token += 1
     st.cache_data.clear()
 
-deals_df, wo_df, quality_notes = load_data(deals_board_id, wo_board_id, st.session_state.refresh_token)
+try:
+    deals_df, wo_df, quality_notes = load_data(deals_board_id, wo_board_id, st.session_state.refresh_token)
+except monday_client.MondayAPIError as e:
+    st.error(
+        "Couldn't retrieve the latest data from monday.com.\n\n"
+        "This is usually one of: the API token is missing or expired, the board ID is wrong, "
+        "or monday.com's API is temporarily unavailable.\n\n"
+        f"Details: {e}"
+    )
+    st.stop()
+except Exception as e:
+    st.error(
+        "Something went wrong while loading and cleaning your monday.com data. "
+        "Try refreshing, and if it keeps happening, double check the board IDs in the sidebar.\n\n"
+        f"Details: {e}"
+    )
+    st.stop()
 
 st.sidebar.metric("Deals loaded", len(deals_df))
 st.sidebar.metric("Work orders loaded", len(wo_df))
@@ -118,7 +142,18 @@ def build_metrics_for_query(user_message: str) -> dict:
     }
 
 
-if prompt := st.chat_input("e.g. How's our pipeline looking for Mining this quarter?"):
+if not st.session_state.messages:
+    st.caption("Quick questions to get started:")
+    cols = st.columns(len(QUICK_QUESTIONS))
+    for col, q in zip(cols, QUICK_QUESTIONS):
+        if col.button(q, use_container_width=True):
+            st.session_state.pending_prompt = q
+
+prompt = st.chat_input("e.g. How's our pipeline looking for Mining this quarter?")
+if not prompt and st.session_state.get("pending_prompt"):
+    prompt = st.session_state.pop("pending_prompt")
+
+if prompt:
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
